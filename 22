@@ -1,0 +1,233 @@
+#include <Wire.h>
+#include <LSM303.h>
+#include <MPU6050.h>
+
+#define A0pin A0
+#define SIpin 47
+#define CLKpin 46
+#define NPIXELS 128
+
+#define ENA 7
+#define IN1 11
+#define IN2 10
+#define IN3 9
+#define IN4 8
+#define ENB 6
+
+byte Pixel[NPIXELS];
+byte Threshold_Data[NPIXELS];
+
+int mission_flag = 0;
+int lyh_cnt1 = 0;  
+int lyh_cnt2 = 0;  
+int lyh_encoderpos = 0;  
+
+MPU6050 mpu;
+
+const int IMG_WIDTH_HALF = 65;
+const int BASE_SPEED = 80;
+const float KP = 3.0;
+const float KD = 0.8;
+float error_old = 0.0;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(A0pin, INPUT);
+  pinMode(SIpin, OUTPUT);
+  pinMode(CLKpin, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  attachInterrupt(digitalPinToInterrupt(20), lyh_intfunc1, RISING);  // Encoder 1
+  attachInterrupt(digitalPinToInterrupt(18), lyh_intfunc2, RISING);  // Encoder 2
+
+  mpu.initialize();  // IMU 초기화
+}
+
+void lyh_intfunc1() {
+  lyh_cnt1++;
+}
+
+void lyh_intfunc2() {
+  lyh_cnt2++;
+}
+
+void motor_l(int speed) {
+  if (speed >= 0) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA, speed);
+  } else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    analogWrite(ENA, -speed);
+  }
+}
+
+void motor_r(int speed) {
+  if (speed >= 0) {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+    analogWrite(ENB, speed);
+  } else {
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB, -speed);
+  }
+}
+
+void motor_control(int left_motor_speed, int right_motor_speed) {
+  motor_l(left_motor_speed);
+  motor_r(right_motor_speed);
+}
+
+void read_line_camera(void) {
+  int i;
+  delay(1);
+
+  digitalWrite(CLKpin, LOW);
+  digitalWrite(SIpin, HIGH);
+  digitalWrite(CLKpin, HIGH);
+  digitalWrite(SIpin, LOW);
+  delayMicroseconds(1);
+
+  for (i = 0; i < NPIXELS; i++) {
+    Pixel[i] = analogRead(A0pin) / 4;
+    digitalWrite(CLKpin, LOW);
+    delayMicroseconds(1);
+    digitalWrite(CLKpin, HIGH);
+  }
+  digitalWrite(CLKpin, LOW);
+}
+
+void threshold_line_image(int threshold_value) {
+  for (int i = 0; i < NPIXELS; i++) {
+    if (Pixel[i] >= threshold_value) {
+      Threshold_Data[i] = 255;
+    } else {
+      Threshold_Data[i] = 0;
+    }
+  }
+}
+
+double line_COM(void) {
+  double COM = 0.0;
+  double mass_sum = 0.0;
+
+  for (int i = 0; i < NPIXELS; i++) {
+    mass_sum += Threshold_Data[i];
+    COM += Threshold_Data[i] * i;
+  }
+
+  if (mass_sum == 0) {
+    return -1;
+  }
+
+  COM = COM / mass_sum;
+
+  return COM;
+}
+
+void turn_90_degree() {
+  int16_t initial_angle = lyh_encoderpos;
+
+  // 목표 각도 = 90도 회전
+  while (abs(lyh_encoderpos - initial_angle) < 90) {
+    motor_control(80, -80);  // 90도 회전
+    mpu.getRotation(&lyh_cnt1, &lyh_cnt2, &lyh_encoderpos);  // 각도 업데이트
+  }
+  motor_control(0, 0);  // 회전 완료 후 멈춤
+}
+
+void loop() {
+  int line_center = 68;
+  double cx = 0;
+
+  read_line_camera();
+  threshold_line_image(150);
+  cx = line_COM();
+
+  lyh_encoderpos = (lyh_cnt1 + lyh_cnt2) / 2;
+
+  switch (mission_flag) {
+    case 0:  // 첫 번째 구간
+      if (lyh_encoderpos < 840) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else if (lyh_encoderpos <= 985) {
+        motor_control(100, -100);  // 왼쪽으로 회전
+      } else {
+        motor_control(0, 0);  // 멈춤
+        delay(300);
+        lyh_encoderpos = lyh_cnt1 = lyh_cnt2 = 0;
+        mission_flag++;
+      }
+      break;
+
+    case 1:  // 두 번째 구간
+      if (lyh_encoderpos < 390) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else {
+        turn_90_degree();  // 90도 회전
+        mission_flag++;
+      }
+      break;
+
+    case 2:  // 세 번째 구간
+      if (lyh_encoderpos < 750) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else if (lyh_encoderpos <= 895) {
+        motor_control(-100, 100);  // 오른쪽으로 회전
+      } else {
+        motor_control(0, 0);  // 멈춤
+        delay(300);
+        lyh_encoderpos = lyh_cnt1 = lyh_cnt2 = 0;
+        mission_flag++;
+      }
+      break;
+
+    case 3:  // 네 번째 구간
+      if (lyh_encoderpos < 400) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else if (lyh_encoderpos <= 545) {
+        motor_control(-100, 100);  // 오른쪽으로 회전
+      } else {
+        motor_control(0, 0);  // 멈춤
+        delay(100);
+        lyh_encoderpos = lyh_cnt1 = lyh_cnt2 = 0;
+        mission_flag++;
+      }
+      break;
+
+    case 4:  // 다섯 번째 구간
+      if (lyh_encoderpos < 1170) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else if (lyh_encoderpos <= 1310) {
+        motor_control(100, -100);  // 왼쪽으로 회전
+      } else {
+        motor_control(0, 0);  // 멈춤
+        delay(100);
+        lyh_encoderpos = lyh_cnt1 = lyh_cnt2 = 0;
+        mission_flag++;
+      }
+      break;
+
+    case 5:  // 여섯 번째 구간
+      if (lyh_encoderpos < 400) {
+        motor_control(BASE_SPEED, BASE_SPEED);  // 직진
+      } else if (lyh_encoderpos <= 540) {
+        motor_control(100, -100);  // 왼쪽으로 회전
+      } else {
+        motor_control(0, 0);  // 멈춤
+        delay(100);
+        lyh_encoderpos = lyh_cnt1 = lyh_cnt2 = 0;
+        mission_flag++;
+      }
+      break;
+  }
+  delay(50);
+}
